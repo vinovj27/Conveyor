@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conveyor</title>
+<style>
+  :root { --bg:#f5f6f8; --panel:#fff; --ink:#151922; --muted:#68707f; --line:#e1e4ea; --accent:#e0661b; --q:#5b6cff; --run:#e0661b; --done:#1f9d63; --dead:#d23c4b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1116; --panel:#171a21; --ink:#e8eaf0; --muted:#949bab; --line:#272b35; --accent:#ff8a42; --q:#8b97ff; --run:#ff8a42; --done:#3fcf8e; --dead:#ff6b78; color-scheme:dark; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:1200px; margin:auto; padding:28px 20px 48px; }
+  header { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+  h1 { margin:0; font-size:26px; letter-spacing:-.02em; } h1 span { color:var(--accent); }
+  .muted { color:var(--muted); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  .kpi b { display:block; font-size:28px; font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
+  .kpi span { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }
+  .kpi.queued b { color:var(--q); } .kpi.running b { color:var(--run); } .kpi.done b { color:var(--done); } .kpi.dead b { color:var(--dead); }
+  .bar { display:flex; height:10px; border-radius:5px; overflow:hidden; background:var(--line); margin:16px 0 26px; }
+  .bar i { display:block; transition:width .4s ease; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; } @media (max-width:900px) { .grid { grid-template-columns:1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; min-width:0; }
+  h2 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); }
+  .scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  .pill { font-size:11px; font-weight:700; padding:2px 8px; border-radius:99px; color:#fff; }
+  .pill.queued { background:var(--q); } .pill.running { background:var(--run); } .pill.done { background:var(--done); } .pill.dead { background:var(--dead); }
+  .err { color:var(--dead); max-width:280px; overflow:hidden; text-overflow:ellipsis; }
+  button { font:inherit; font-size:12px; padding:4px 10px; border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--ink); cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .wide { grid-column:1 / -1; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Con<span>veyor</span></h1>
+    <span class="muted" id="sub">Distributed task queue · live</span>
+  </header>
+  <div class="kpis">
+    <div class="kpi queued"><b id="k-queued">–</b><span>Queued</span></div>
+    <div class="kpi running"><b id="k-running">–</b><span>Running</span></div>
+    <div class="kpi done"><b id="k-done">–</b><span>Done</span></div>
+    <div class="kpi dead"><b id="k-dead">–</b><span>Dead letter</span></div>
+    <div class="kpi"><b id="k-tput">–</b><span>Jobs / second</span></div>
+    <div class="kpi"><b id="k-retried">–</b><span>Retried jobs</span></div>
+  </div>
+  <div class="bar" aria-hidden="true"><i id="b-done" style="background:var(--done)"></i><i id="b-running" style="background:var(--run)"></i><i id="b-queued" style="background:var(--q)"></i><i id="b-dead" style="background:var(--dead)"></i></div>
+  <div class="grid">
+    <section><h2>Active workers</h2><div class="scroll"><table><thead><tr><th>Worker slot</th><th>Jobs in hand</th></tr></thead><tbody id="workers"></tbody></table></div></section>
+    <section><h2>By task</h2><div class="scroll"><table><thead><tr><th>Task</th><th>Total</th><th>Done</th><th>Dead</th><th>Avg latency</th></tr></thead><tbody id="tasks"></tbody></table></div></section>
+    <section class="wide"><h2>Dead-letter queue</h2><div class="scroll"><table><thead><tr><th>ID</th><th>Task</th><th>Attempts</th><th>Last error</th><th></th></tr></thead><tbody id="dead"></tbody></table></div></section>
+    <section class="wide"><h2>Recent jobs</h2><div class="scroll"><table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Priority</th><th>Attempts</th><th>Worker</th><th>Result / error</th></tr></thead><tbody id="jobs"></tbody></table></div></section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const first = s => (s || '').split('\n')[0];
+async function refresh() {
+  const [s, jobs, dead] = await Promise.all(['/api/stats', '/api/jobs', '/api/jobs?status=dead'].map(u => fetch(u).then(r => r.json())));
+  const c = s.counts, total = Object.values(c).reduce((a, b) => a + b, 0) || 1;
+  for (const k of ['queued', 'running', 'done', 'dead']) { $('k-' + k).textContent = c[k].toLocaleString(); $('b-' + k).style.width = (100 * c[k] / total) + '%'; }
+  $('k-tput').textContent = s.throughput_per_s;
+  $('k-retried').textContent = s.retried.toLocaleString();
+  const w = Object.entries(s.active_workers);
+  $('workers').innerHTML = w.length ? w.map(([n, k]) => `<tr><td>${esc(n)}</td><td>${k}</td></tr>`).join('') : '<tr><td colspan="2" class="muted">No worker is holding a job right now</td></tr>';
+  $('tasks').innerHTML = s.tasks.map(t => `<tr><td>${esc(t.task)}</td><td>${t.total}</td><td>${t.done ?? 0}</td><td>${t.dead ?? 0}</td><td>${t.avg_latency == null ? '–' : t.avg_latency.toFixed(2) + ' s'}</td></tr>`).join('');
+  $('dead').innerHTML = dead.length ? dead.map(j => `<tr><td>${j.id}</td><td>${esc(j.task)}</td><td>${j.attempts}/${j.max_attempts}</td><td class="err" title="${esc(j.error)}">${esc(first(j.error))}</td><td><button data-id="${j.id}">Retry</button></td></tr>`).join('') : '<tr><td colspan="5" class="muted">Empty: every failed job has been retried or succeeded</td></tr>';
+  $('jobs').innerHTML = jobs.map(j => `<tr><td>${j.id}</td><td>${esc(j.task)}</td><td><span class="pill ${j.status}">${j.status}</span></td><td>${j.priority}</td><td>${j.attempts}/${j.max_attempts}</td><td>${esc(j.worker || '–')}</td><td class="${j.status === 'dead' || (j.error && j.status === 'queued') ? 'err' : ''}">${esc(j.status === 'done' ? JSON.stringify(j.result) : first(j.error) || '')}</td></tr>`).join('');
+  document.querySelectorAll('#dead button').forEach(b => b.onclick = async () => {
+    await fetch('/api/retry', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: Number(b.dataset.id) }) });
+    refresh();
+  });
+}
+refresh(); setInterval(refresh, 1000);
+</script>
+</body>
+</html>
